@@ -37,7 +37,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.NavigableSet;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.TreeMap;
 
 /**
@@ -50,23 +53,18 @@ import java.util.TreeMap;
  * @author Kohsuke Kawaguchi
  */
 public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
-    protected volatile Map<K, V> core;
-    /**
-     * Read-only view of {@link #core}.
-     */
-    private volatile Map<K, V> view;
+    protected volatile Map<K, V> snapshot;
 
     protected CopyOnWriteMap(Map<K, V> core) {
         update(core);
     }
 
-    protected CopyOnWriteMap() {
-        update(Collections.emptyMap());
+    public Map<K, V> getSnapshot() {
+        return snapshot;
     }
 
     protected void update(Map<K, V> m) {
-        core = m;
-        view = Collections.unmodifiableMap(core);
+        snapshot = Collections.unmodifiableMap(m);
     }
 
     /**
@@ -81,27 +79,27 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
 
     @Override
     public int size() {
-        return core.size();
+        return snapshot.size();
     }
 
     @Override
     public boolean isEmpty() {
-        return core.isEmpty();
+        return snapshot.isEmpty();
     }
 
     @Override
     public boolean containsKey(Object key) {
-        return core.containsKey(key);
+        return snapshot.containsKey(key);
     }
 
     @Override
     public boolean containsValue(Object value) {
-        return core.containsValue(value);
+        return snapshot.containsValue(value);
     }
 
     @Override
     public V get(Object key) {
-        return core.get(key);
+        return snapshot.get(key);
     }
 
     @Override
@@ -133,7 +131,7 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
 
     @Override
     public synchronized void clear() {
-        update(Collections.emptyMap());
+        update(Collections.emptyNavigableMap());
     }
 
     /**
@@ -141,7 +139,7 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
      */
     @Override
     public Set<K> keySet() {
-        return view.keySet();
+        return snapshot.keySet();
     }
 
     /**
@@ -149,7 +147,7 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
      */
     @Override
     public Collection<V> values() {
-        return view.values();
+        return snapshot.values();
     }
 
     /**
@@ -157,20 +155,20 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
      */
     @Override
     public Set<Entry<K, V>> entrySet() {
-        return view.entrySet();
+        return snapshot.entrySet();
     }
 
     @Override public int hashCode() {
-        return copy().hashCode();
+        return snapshot.hashCode();
     }
 
     @SuppressWarnings("EqualsWhichDoesntCheckParameterClass")
     @Override public boolean equals(Object obj) {
-        return copy().equals(obj);
+        return snapshot.equals(obj);
     }
 
     @Override public String toString() {
-        return copy().toString();
+        return snapshot.toString();
     }
 
     /**
@@ -182,11 +180,12 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
         }
 
         public Hash() {
+            super(Collections.emptyMap());
         }
 
         @Override
         protected Map<K, V> copy() {
-            return new LinkedHashMap<>(core);
+            return new LinkedHashMap<>(getSnapshot());
         }
 
         public static class ConverterImpl extends MapConverter {
@@ -201,12 +200,12 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
 
             @Override
             public Object unmarshal(HierarchicalStreamReader reader, UnmarshallingContext context) {
-                return new Hash((Map) super.unmarshal(reader, context));
+                return new Hash<>((Map<?, ?>) super.unmarshal(reader, context));
             }
 
             @Override
             public void marshal(Object source, HierarchicalStreamWriter writer, MarshallingContext context) {
-                super.marshal(((Hash) source).core, writer, context);
+                super.marshal(((Hash<?, ?>) source).getSnapshot(), writer, context);
             }
         }
     }
@@ -214,33 +213,163 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
     /**
      * {@link CopyOnWriteMap} backed by {@link TreeMap}.
      */
-    public static final class Tree<K, V> extends CopyOnWriteMap<K, V> {
-        private final Comparator<K> comparator;
+    public static final class Tree<K, V> extends CopyOnWriteMap<K, V> implements NavigableMap<K, V> {
+        private final Comparator<? super K> comparator;
 
-        public Tree(Map<K, V> core, Comparator<K> comparator) {
+        public Tree(Map<K, V> core, Comparator<? super K> comparator) {
             this(comparator);
             putAll(core);
         }
 
-        public Tree(Comparator<K> comparator) {
-            super(new TreeMap<>(comparator));
+        public Tree(NavigableMap<K, V> m) {
+            this(m.comparator());
+            putAll(m);
+        }
+
+        public Tree(Comparator<? super K> comparator) {
+            super(Collections.emptyNavigableMap());
             this.comparator = comparator;
         }
 
         public Tree() {
-            this(null);
+            this((Comparator<? super K>) null);
         }
 
         @Override
-        protected Map<K, V> copy() {
+        protected void update(Map<K, V> m) {
+           snapshot = Collections.unmodifiableNavigableMap((NavigableMap<K, ? extends V>) m);
+        }
+
+        @Override
+        protected TreeMap<K, V> copy() {
             TreeMap<K, V> m = new TreeMap<>(comparator);
-            m.putAll(core);
+            m.putAll(getSnapshot());
             return m;
         }
 
         @Override
-        public synchronized void clear() {
-            update(new TreeMap<>(comparator));
+        public NavigableMap<K, V> getSnapshot() {
+            return (NavigableMap<K, V>) super.getSnapshot();
+        }
+
+        @Override
+        public Entry<K, V> lowerEntry(K key) {
+            return getSnapshot().lowerEntry(key);
+        }
+
+        @Override
+        public K lowerKey(K key) {
+            return getSnapshot().lowerKey(key);
+        }
+
+        @Override
+        public Entry<K, V> floorEntry(K key) {
+            return getSnapshot().floorEntry(key);
+        }
+
+        @Override
+        public K floorKey(K key) {
+            return getSnapshot().floorKey(key);
+        }
+
+        @Override
+        public Entry<K, V> ceilingEntry(K key) {
+            return getSnapshot().ceilingEntry(key);
+        }
+
+        @Override
+        public K ceilingKey(K key) {
+            return getSnapshot().ceilingKey(key);
+        }
+
+        @Override
+        public Entry<K, V> higherEntry(K key) {
+            return getSnapshot().higherEntry(key);
+        }
+
+        @Override
+        public K higherKey(K key) {
+            return getSnapshot().higherKey(key);
+        }
+
+        @Override
+        public Entry<K, V> firstEntry() {
+            return getSnapshot().firstEntry();
+        }
+
+        @Override
+        public Entry<K, V> lastEntry() {
+            return getSnapshot().lastEntry();
+        }
+
+        @Override
+        public Entry<K, V> pollFirstEntry() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Entry<K, V> pollLastEntry() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public NavigableMap<K, V> descendingMap() {
+            return getSnapshot().descendingMap();
+        }
+
+        @Override
+        public NavigableSet<K> navigableKeySet() {
+            return getSnapshot().navigableKeySet();
+        }
+
+        @Override
+        public NavigableSet<K> descendingKeySet() {
+            return getSnapshot().descendingKeySet();
+        }
+
+        @Override
+        public NavigableMap<K, V> subMap(K fromKey, boolean fromInclusive, K toKey, boolean toInclusive) {
+            return getSnapshot().subMap(fromKey, fromInclusive, toKey, toInclusive);
+        }
+
+        @Override
+        public NavigableMap<K, V> headMap(K toKey, boolean inclusive) {
+            return getSnapshot().headMap(toKey, inclusive);
+        }
+
+        @Override
+        public NavigableMap<K, V> tailMap(K fromKey, boolean inclusive) {
+            return getSnapshot().tailMap(fromKey, inclusive);
+        }
+
+        @Override
+        public Comparator<? super K> comparator() {
+            return getSnapshot().comparator();
+        }
+
+        @Override
+        public SortedMap<K, V> subMap(K fromKey, K toKey) {
+            return getSnapshot().subMap(fromKey, toKey);
+        }
+
+        @Override
+        public SortedMap<K, V> headMap(K toKey) {
+            return getSnapshot().headMap(toKey);
+        }
+
+        @Override
+        public SortedMap<K, V> tailMap(K fromKey) {
+            return getSnapshot().tailMap(fromKey);
+        }
+
+        @Override
+        public K firstKey() {
+            return getSnapshot().firstKey();
+        }
+
+        @Override
+        public K lastKey() {
+            return getSnapshot().lastKey();
         }
 
         public static class ConverterImpl extends TreeMapConverter {
@@ -255,13 +384,12 @@ public abstract class CopyOnWriteMap<K, V> implements Map<K, V> {
 
             @Override
             public Object unmarshal(HierarchicalStreamReader reader, UnmarshallingContext context) {
-                TreeMap tm = (TreeMap) super.unmarshal(reader, context);
-                return new Tree(tm, tm.comparator());
+                return new Tree<>((TreeMap<?, ?>) super.unmarshal(reader, context));
             }
 
             @Override
             public void marshal(Object source, HierarchicalStreamWriter writer, MarshallingContext context) {
-                super.marshal(((Tree) source).core, writer, context);
+                super.marshal(((Tree<?, ?>) source).getSnapshot(), writer, context);
             }
         }
     }

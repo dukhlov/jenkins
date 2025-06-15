@@ -165,20 +165,15 @@ public class LogRotator extends BuildDiscarder {
         Run lstb = removeLastBuild ? null : job.getLastStableBuild();
 
         if (numToKeep != -1) {
-            // Note that RunList.size is deprecated, and indeed here we are loading all the builds of the job.
-            // However we would need to load the first numToKeep anyway, just to skip over them;
-            // and we would need to load the rest anyway, to delete them.
-            // (Using RunMap.headMap would not suffice, since we do not know if some recent builds have been deleted for other reasons,
-            // so simply subtracting numToKeep from the currently last build number might cause us to delete too many.)
-            RunList<? extends Run<?, ?>> builds = job.getBuilds();
-            for (Run r : builds.subList(Math.min(builds.size(), numToKeep), builds.size())) {
+            job.getBuildsAsMap().keySet().stream().skip(numToKeep).forEach(n -> {
+                Run r = job.getBuildByNumber(n);
                 if (shouldKeepRun(r, lsb, lstb)) {
-                    continue;
+                    return;
                 }
                 LOGGER.log(FINE, "{0} is to be removed", r);
                 try { r.delete(); }
                 catch (IOException ex) { exceptionMap.computeIfAbsent(r, key -> new HashSet<>()).add(ex); }
-            }
+            });
         }
 
         if (daysToKeep != -1) {
