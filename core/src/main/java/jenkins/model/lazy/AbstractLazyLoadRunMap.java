@@ -26,6 +26,7 @@ package jenkins.model.lazy;
 
 import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.ASC;
 import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.DESC;
+import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.EXACT;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import hudson.model.Job;
@@ -44,6 +45,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.Spliterator;
@@ -99,13 +101,86 @@ import org.kohsuke.accmod.restrictions.NoExternalUse;
  * @since 1.485
  */
 public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> implements SortedMap<Integer, R> {
+    final BuildReferenceMapAdapter.Loader<R> buildReferenceLoader = new BuildReferenceMapAdapter.Loader<>() {
+        @Override
+        public R resolveBuildRef(BuildReference<R> ref) {
+            return AbstractLazyLoadRunMap.this.resolveBuildRef(ref);
+        }
+
+        @Override
+        public int resolveBuildNumber(R r) {
+            return AbstractLazyLoadRunMap.this.getNumberOf(r);
+        }
+    };
+
     private final CopyOnWriteMap.Tree<Integer, BuildReference<R>> core = new CopyOnWriteMap.Tree<>(
             Collections.reverseOrder());
+    private final BuildReferenceMapAdapter<R> adapter = new BuildReferenceMapAdapter<>(buildReferenceLoader, core);
 
-    private LazyLoadRunMapEntrySet<R> entrySet = new LazyLoadRunMapEntrySet<>(this);
-
+    private transient volatile Set<Map.Entry<Integer, R>> entrySet;
     private transient volatile Set<Integer> keySet;
     private transient volatile Collection<R> values;
+
+    @Override
+    public Set<Map.Entry<Integer, R>> entrySet() {
+        assert baseDirInitialized();
+
+        Set<Map.Entry<Integer, R>> es = entrySet;
+        if (es == null) {
+            es = new AbstractSet<>() {
+                @Override
+                public Iterator<Map.Entry<Integer, R>> iterator() {
+                    return new Iterator<>() {
+                        private final Iterator<Map.Entry<Integer, R>> it = adapter.entrySet().iterator();
+                        private Map.Entry<Integer, R> current;
+
+                        @Override
+                        public boolean hasNext() {
+                            return it.hasNext();
+                        }
+
+                        @Override
+                        public Map.Entry<Integer, R> next() {
+                            return current = it.next();
+                        }
+
+                        @Override
+                        public void remove() {
+                            AbstractLazyLoadRunMap.this.removeValue(current.getValue());
+                        }
+                    };
+                }
+
+                @Override
+                public Spliterator<Map.Entry<Integer, R>> spliterator() {
+                    return adapter.entrySet().spliterator();
+                }
+
+                @Override
+                public int size() {
+                    return adapter.size();
+                }
+
+                @Override
+                public boolean isEmpty() {
+                    return AbstractLazyLoadRunMap.this.isEmpty();
+                }
+
+                @Override
+                public boolean contains(Object o) {
+                    if (o instanceof Map.Entry<?, ?> entry) {
+                        if (entry.getKey() instanceof Integer key) {
+                            R value = resolveBuildRef((core.get(key)));
+                            return Objects.equals(entry.getValue(), value);
+                        }
+                    }
+                    return false;
+                }
+            };
+            entrySet = es;
+        }
+        return es;
+    }
 
     @Override
     public Set<Integer> keySet() {
@@ -363,9 +438,14 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     }
 
     @Override
-    public Set<Entry<Integer, R>> entrySet() {
-        assert baseDirInitialized();
-        return entrySet;
+    public boolean containsKey(Object value) {
+        return adapter.containsKey(value);
+    }
+
+    @Override
+    public boolean containsValue(Object value) {
+        return adapter.containsValue(value);
+
     }
 
     /**
@@ -379,7 +459,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
                 res.put(entry.getKey(), buildRef);
             }
         }
-        return Collections.unmodifiableSortedMap(new BuildReferenceMapAdapter<>(this, res));
+        return Collections.unmodifiableSortedMap(new BuildReferenceMapAdapter<>(this.buildReferenceLoader, res));
     }
 
     /**
@@ -390,47 +470,27 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      */
     @Override
     public SortedMap<Integer, R> subMap(Integer fromKey, Integer toKey) {
-        // TODO: if this method can produce a lazy map, that'd be wonderful
-        // because due to the lack of floor/ceil/higher/lower kind of methods
-        // to look up keys in SortedMap, various places of Jenkins rely on
-        // subMap+firstKey/lastKey combo.
-
-        R start = search(fromKey, DESC);
-        if (start == null)    return EMPTY_SORTED_MAP;
-
-        R end = search(toKey, ASC);
-        if (end == null)      return EMPTY_SORTED_MAP;
-
-        for (R i = start; i != end; ) {
-            i = search(getNumberOf(i) - 1, DESC);
-            assert i != null;
-        }
-
-        return Collections.unmodifiableSortedMap(new BuildReferenceMapAdapter<>(this, core.subMap(fromKey, toKey)));
+        return adapter.subMap(fromKey, toKey);
     }
 
     @Override
     public SortedMap<Integer, R> headMap(Integer toKey) {
-        return subMap(Integer.MAX_VALUE, toKey);
+        return adapter.headMap(toKey);
     }
 
     @Override
     public SortedMap<Integer, R> tailMap(Integer fromKey) {
-        return subMap(fromKey, Integer.MIN_VALUE);
+        return adapter.tailMap(fromKey);
     }
 
     @Override
     public Integer firstKey() {
-        R r = newestBuild();
-        if (r == null)    throw new NoSuchElementException();
-        return getNumberOf(r);
+        return this.adapter.firstKey();
     }
 
     @Override
     public Integer lastKey() {
-        R r = oldestBuild();
-        if (r == null)    throw new NoSuchElementException();
-        return getNumberOf(r);
+        return this.adapter.lastKey();
     }
 
     public R newestBuild() {
@@ -463,7 +523,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * @since 2.14
      */
     public boolean runExists(int number) {
-        return this.core.containsKey(number);
+        return this.adapter.containsKey(number);
     }
 
     /**
@@ -478,36 +538,15 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      *      If DESC, finds the closest #M that satisfies M ≤ N.
      */
     public @CheckForNull R search(final int n, final Direction d) {
-        switch (d) {
-        case EXACT:
-            return getByNumber(n);
-        case ASC:
-            for (int m : core.descendingMap().keySet()) {
-                if (m < n) {
-                    continue;
-                }
-                R r = getByNumber(m);
-                if (r != null) {
-                    return r;
-                }
-            }
-            return null;
-        case DESC:
-            Iterator<Integer> iterator = core.keySet().iterator();
-            while (iterator.hasNext()) {
-                int m = iterator.next();
-                if (m > n) {
-                    continue;
-                }
-                R r = getByNumber(m);
-                if (r != null) {
-                    return r;
-                }
-            }
-            return null;
-        default:
-            throw new AssertionError();
+        if (d == EXACT) {
+            return this.adapter.get(n);
         }
+
+        Map.Entry<Integer, R> entry = d == ASC
+                ? this.adapter.headMap(n, true).lastEntry()
+                : this.adapter.tailMap(n, true).firstEntry();
+
+        return entry == null ? null : entry.getValue();
     }
 
     public R getById(String id) {
@@ -584,8 +623,9 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     @Override
     public synchronized R put(Integer key, R r) {
         int n = getNumberOf(r);
-        BuildReference<R> old = core.put(n, createReference(r));
-        return resolveBuildRef(old);
+        R prev = adapter.get(n);
+        core.put(key, createReference(r));
+        return prev;
     }
 
     @Override
@@ -693,8 +733,6 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     public enum Direction {
         ASC, DESC, EXACT
     }
-
-    private static final SortedMap EMPTY_SORTED_MAP = Collections.unmodifiableSortedMap(new TreeMap());
 
     static final Logger LOGGER = Logger.getLogger(AbstractLazyLoadRunMap.class.getName());
 }
