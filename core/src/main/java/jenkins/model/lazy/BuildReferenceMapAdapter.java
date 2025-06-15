@@ -37,7 +37,7 @@ class BuildReferenceMapAdapter<R> implements SortedMap<Integer, R> {
 
         R v = ref.get();
         if (v == null)
-            v = loader.getById(ref.id);
+            v = loader.getByNumber(ref.number);
         return v;
     }
 

@@ -32,15 +32,27 @@ import org.kohsuke.accmod.restrictions.NoExternalUse;
  * @since 1.485 (but as of 1.548 not a {@link SoftReference})
  */
 public final class BuildReference<R> {
-
     private static final Logger LOGGER = Logger.getLogger(BuildReference.class.getName());
 
-    final String id;
+    /**
+     * Used in {@link RunMixIn#previousBuildR} and {@link RunMixIn#nextBuildR} to indicate
+     * that we know there is no next/previous build (as opposed to {@code null},
+     * which is used to indicate we haven't determined if there is a next/previous
+     * build.)
+     */
+    @SuppressWarnings("rawtypes")
+    public static final BuildReference NONE = new BuildReference(-1);
+
+    final int number;
     private volatile Holder<R> holder;
 
-    public BuildReference(String id, R referent) {
-        this.id = id;
-        this.holder = findHolder(referent);
+    public BuildReference(int number) {
+        this(number, null);
+    }
+
+    public BuildReference(int number, R referent) {
+        this.number = number;
+        set(referent);
     }
 
     /**
@@ -62,24 +74,33 @@ public final class BuildReference<R> {
         holder = null;
     }
 
+    /**
+     * Set referent if loaded
+     *
+     * @see AbstractLazyLoadRunMap#getByNumber(int)
+     */
+    /*package*/ void set(R referent) {
+        holder = findHolder(referent);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
 
         BuildReference<?> that = (BuildReference) o;
-        return id.equals(that.id);
+        return number == that.number;
 
     }
 
     @Override
     public int hashCode() {
-        return id.hashCode();
+        return number;
     }
 
     @Override public String toString() {
         R r = get();
-        return r != null ? r.toString() : id;
+        return r != null ? r.toString() : Integer.toString(number);
     }
 
     /**

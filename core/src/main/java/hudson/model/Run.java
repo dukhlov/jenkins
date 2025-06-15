@@ -795,7 +795,7 @@ public abstract class Run<JobT extends Job<JobT, RunT>, RunT extends Run<JobT, R
      * @since 1.556
      */
     protected @NonNull BuildReference<RunT> createReference() {
-        return new BuildReference<>(getId(), _this());
+        return new BuildReference<>(getNumber(), _this());
     }
 
     /**

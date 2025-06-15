@@ -338,18 +338,9 @@ public abstract class LazyBuildMixIn<JobT extends Job<JobT, RunT> & Queue.Task &
          */
         private volatile BuildReference<RunT> previousBuildR, nextBuildR;
 
-        /**
-         * Used in {@link #previousBuildR} and {@link #nextBuildR} to indicate
-         * that we know there is no next/previous build (as opposed to {@code null},
-         * which is used to indicate we haven't determined if there is a next/previous
-         * build.)
-         */
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        private static final BuildReference NONE = new BuildReference("NONE", null);
-
         @SuppressWarnings("unchecked")
         private BuildReference<RunT> none() {
-            return NONE;
+            return BuildReference.NONE;
         }
 
         private BuildReference<RunT> selfReference;
@@ -363,7 +354,7 @@ public abstract class LazyBuildMixIn<JobT extends Job<JobT, RunT> & Queue.Task &
          */
         public final synchronized BuildReference<RunT> createReference() {
             if (selfReference == null) {
-                selfReference = new BuildReference<>(asRun().getId(), asRun());
+                selfReference = new BuildReference<>(asRun().getNumber(), asRun());
             }
             return selfReference;
         }

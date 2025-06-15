@@ -24,32 +24,25 @@
 
 package jenkins.model.lazy;
 
-import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.ASC;
 import static jenkins.model.lazy.AbstractLazyLoadRunMap.Direction.DESC;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
+import edu.umd.cs.findbugs.annotations.NonNull;
 import hudson.model.Job;
 import hudson.model.Run;
 import hudson.model.RunMap;
 import hudson.model.listeners.RunListener;
 import java.io.File;
 import java.io.IOException;
-import java.util.AbstractCollection;
 import java.util.AbstractMap;
-import java.util.AbstractSet;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Iterator;
-import java.util.ListIterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.SortedMap;
-import java.util.Spliterator;
-import java.util.Spliterators;
 import java.util.TreeMap;
-import java.util.function.IntConsumer;
 import java.util.function.IntPredicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -84,205 +77,29 @@ import org.kohsuke.accmod.restrictions.NoExternalUse;
  * {@link #size()} may be inaccurate because we only count the number of directories that look like
  * build records, without checking if they are loadable. But these weaknesses aren't distinguishable
  * from concurrent modifications, where another thread deletes a build while one thread iterates them.
- *
- * <p>
- * Some of the {@link SortedMap} operations are inefficiently implemented, by
- * {@linkplain #all() loading all the build records eagerly}. We hope to replace
- * these implementations by more efficient lazy-loading ones as we go.
- *
- * <p>
+
  * Object lock of {@code this} is used to make sure mutation occurs sequentially.
  * That is, ensure that only one thread is actually calling {@link #retrieve(File)} and
- * updating {@link jenkins.model.lazy.AbstractLazyLoadRunMap.Index#byNumber}.
+ * updating {@link jenkins.model.lazy.AbstractLazyLoadRunMap#buildRefSortedMap}.
  *
  * @author Kohsuke Kawaguchi
  * @since 1.485
  */
 public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> implements SortedMap<Integer, R> {
-    /**
-     * Used in {@link #all()} to quickly determine if we've already loaded everything.
-     */
-    private volatile boolean fullyLoaded;
-
-    /**
-     * Currently visible index.
-     * Updated atomically. Once set to this field, the index object may not be modified.
-     */
-    private volatile Index index = new Index();
-    private LazyLoadRunMapEntrySet<R> entrySet = new LazyLoadRunMapEntrySet<>(this);
-
-    private transient volatile Set<Integer> keySet;
-    private transient volatile Collection<R> values;
+    private volatile TreeMap<Integer, BuildReference<R>> buildRefSortedMap;
 
     @Override
+    @NonNull
     public Set<Integer> keySet() {
-        Set<Integer> ks = keySet;
-        if (ks == null) {
-            ks = new AbstractSet<>() {
-                @Override
-                public Iterator<Integer> iterator() {
-                    return new Iterator() {
-                        private final Iterator<Entry<Integer, R>> it = entrySet().iterator();
-
-                        @Override
-                        public boolean hasNext() {
-                            return it.hasNext();
-                        }
-
-                        @Override
-                        public Integer next() {
-                            return it.next().getKey();
-                        }
-
-                        @Override
-                        public void remove() {
-                            it.remove();
-                        }
-                    };
-                }
-
-                @Override
-                public Spliterator<Integer> spliterator() {
-                    return new Spliterators.AbstractIntSpliterator(
-                            Long.MAX_VALUE,
-                            Spliterator.DISTINCT | Spliterator.ORDERED | Spliterator.SORTED) {
-                        private final Iterator<Integer> it = iterator();
-
-                        @Override
-                        public boolean tryAdvance(IntConsumer action) {
-                            if (action == null) {
-                                throw new NullPointerException();
-                            }
-                            if (it.hasNext()) {
-                                action.accept(it.next());
-                                return true;
-                            }
-                            return false;
-                        }
-
-                        @Override
-                        public Comparator<Integer> getComparator() {
-                            return Collections.reverseOrder();
-                        }
-                    };
-                }
-
-                @Override
-                public int size() {
-                    return AbstractLazyLoadRunMap.this.size();
-                }
-
-                @Override
-                public boolean isEmpty() {
-                    return AbstractLazyLoadRunMap.this.isEmpty();
-                }
-
-                @Override
-                public void clear() {
-                    AbstractLazyLoadRunMap.this.clear();
-                }
-
-                @Override
-                public boolean contains(Object k) {
-                    return AbstractLazyLoadRunMap.this.containsKey(k);
-                }
-            };
-            keySet = ks;
-        }
-        return ks;
+      return Collections.unmodifiableSet(buildRefSortedMap.keySet());
     }
 
     @Override
+    @NonNull
     public Collection<R> values() {
-        Collection<R> vals = values;
-        if (vals == null) {
-            vals = new AbstractCollection<>() {
-                @Override
-                public Iterator<R> iterator() {
-                    return new Iterator<>() {
-                        private final Iterator<Entry<Integer, R>> it = entrySet().iterator();
-
-                        @Override
-                        public boolean hasNext() {
-                            return it.hasNext();
-                        }
-
-                        @Override
-                        public R next() {
-                            return it.next().getValue();
-                        }
-
-                        @Override
-                        public void remove() {
-                            it.remove();
-                        }
-                    };
-                }
-
-                @Override
-                public Spliterator<R> spliterator() {
-                    return Spliterators.spliteratorUnknownSize(
-                            iterator(), Spliterator.DISTINCT | Spliterator.ORDERED);
-                }
-
-                @Override
-                public int size() {
-                    return AbstractLazyLoadRunMap.this.size();
-                }
-
-                @Override
-                public boolean isEmpty() {
-                    return AbstractLazyLoadRunMap.this.isEmpty();
-                }
-
-                @Override
-                public void clear() {
-                    AbstractLazyLoadRunMap.this.clear();
-                }
-
-                @Override
-                public boolean contains(Object v) {
-                    return AbstractLazyLoadRunMap.this.containsValue(v);
-                }
-            };
-            values = vals;
-        }
-        return vals;
+        return Collections.unmodifiableCollection(
+                new BuildReferenceMapAdapter<>(this, buildRefSortedMap).values());
     }
-
-    /**
-     * Historical holder for map.
-     *
-     * TODO all this mess including {@link #numberOnDisk} could probably be simplified to a single {@code TreeMap<Integer,BuildReference<R>>}
-     * where a null value means not yet loaded and a broken entry just uses {@code NoHolder}.
-     *
-     * The idiom is that you put yourself in a synchronized block, {@linkplain #copy() make a copy of this},
-     * update the copy, then set it to {@link #index}.
-     */
-    private class Index {
-        /**
-         * Stores the mapping from build number to build, for builds that are already loaded.
-         *
-         * If we have known load failure of the given ID, we record that in the map
-         * by using the null value (not to be confused with a non-null {@link BuildReference}
-         * with null referent, which just means the record was GCed.)
-         */
-        private final TreeMap<Integer, BuildReference<R>> byNumber;
-
-        private Index() {
-            byNumber = new TreeMap<>(Collections.reverseOrder());
-        }
-
-        private Index(Index rhs) {
-            byNumber = new TreeMap<>(rhs.byNumber);
-        }
-    }
-
-    /**
-     * Build numbers found on disk, in the ascending order.
-     */
-    // copy on write
-    private volatile SortedIntList numberOnDisk = new SortedIntList(0);
 
     /**
      * Base directory for data.
@@ -294,6 +111,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
 
     @Restricted(NoExternalUse.class) // subclassing other than by RunMap does not guarantee compatibility
     protected AbstractLazyLoadRunMap() {
+        reset(Collections.emptyMap());
     }
 
     @Restricted(NoExternalUse.class)
@@ -330,8 +148,6 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * @since 1.507
      */
     public synchronized void purgeCache() {
-        index = new Index();
-        fullyLoaded = false;
         loadNumberOnDisk();
     }
 
@@ -343,7 +159,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
             // the job may have just been created
             kids = MemoryReductionUtil.EMPTY_STRING_ARRAY;
         }
-        SortedIntList list = new SortedIntList(kids.length / 2);
+        TreeMap<Integer, BuildReference<R>> newBuildRefsMap = new TreeMap<>(Collections.reverseOrder());
         var allower = createLoadAllower();
         for (String s : kids) {
             if (!BUILD_NUMBER.matcher(s).matches()) {
@@ -353,7 +169,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
             try {
                 int buildNumber = Integer.parseInt(s);
                 if (allower.test(buildNumber)) {
-                    list.add(buildNumber);
+                    newBuildRefsMap.put(buildNumber, new BuildReference<>(buildNumber, null));
                 } else {
                     LOGGER.fine(() -> "declining to consider " + buildNumber + " in " + dir);
                 }
@@ -361,8 +177,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
                 // matched BUILD_NUMBER but not an int?
             }
         }
-        list.sort();
-        numberOnDisk = list;
+        buildRefSortedMap = newBuildRefsMap;
     }
 
     @Restricted(NoExternalUse.class)
@@ -384,13 +199,15 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     public final void recognizeNumber(int buildNumber) {
         if (new File(dir, Integer.toString(buildNumber)).isDirectory()) {
             synchronized (this) {
-                SortedIntList list = new SortedIntList(numberOnDisk);
-                if (list.contains(buildNumber)) {
+                if (this.buildRefSortedMap.containsKey(buildNumber)) {
                     LOGGER.fine(() -> "already knew about " + buildNumber + " in " + dir);
                 } else {
-                    list.add(buildNumber);
-                    list.sort();
-                    numberOnDisk = list;
+                    TreeMap<Integer, BuildReference<R>> copy = copy();
+                    copy.put(buildNumber, new BuildReference<>(buildNumber, null));
+
+
+                    this.buildRefSortedMap = copy;
+
                     LOGGER.fine(() -> "recognizing " + buildNumber + " in " + dir);
                 }
             }
@@ -401,7 +218,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
 
     @Override
     public Comparator<? super Integer> comparator() {
-        return Collections.reverseOrder();
+        return buildRefSortedMap.comparator();
     }
 
     @Override
@@ -410,16 +227,30 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     }
 
     @Override
+    @NonNull
     public Set<Entry<Integer, R>> entrySet() {
         assert baseDirInitialized();
-        return entrySet;
+        return Collections.unmodifiableSet(new BuildReferenceMapAdapter<>(this, buildRefSortedMap).entrySet());
     }
 
     /**
      * Returns a read-only view of records that has already been loaded.
      */
     public SortedMap<Integer, R> getLoadedBuilds() {
-        return Collections.unmodifiableSortedMap(new BuildReferenceMapAdapter<>(this, index.byNumber));
+        TreeMap<Integer, R> res = new TreeMap<>(Collections.reverseOrder());
+        for (var entry: this.buildRefSortedMap.entrySet()) {
+            BuildReference<R> buildRef = entry.getValue();
+            if (buildRef == null) {
+                continue;
+            }
+            R r = buildRef.get();
+            if (r == null) {
+                continue;
+            }
+            res.put(entry.getKey(), r);
+        }
+
+        return Collections.unmodifiableSortedMap(res);
     }
 
     /**
@@ -429,56 +260,50 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      *      Smallest build number-1 to be in the returned set (-1 because this is exclusive)
      */
     @Override
+    @NonNull
     public SortedMap<Integer, R> subMap(Integer fromKey, Integer toKey) {
-        // TODO: if this method can produce a lazy map, that'd be wonderful
-        // because due to the lack of floor/ceil/higher/lower kind of methods
-        // to look up keys in SortedMap, various places of Jenkins rely on
-        // subMap+firstKey/lastKey combo.
-
-        R start = search(fromKey, DESC);
-        if (start == null)    return EMPTY_SORTED_MAP;
-
-        R end = search(toKey, ASC);
-        if (end == null)      return EMPTY_SORTED_MAP;
-
-        for (R i = start; i != end; ) {
-            i = search(getNumberOf(i) - 1, DESC);
-            assert i != null;
-        }
-
-        return Collections.unmodifiableSortedMap(new BuildReferenceMapAdapter<>(this, index.byNumber.subMap(fromKey, toKey)));
+        return Collections.unmodifiableSortedMap(new BuildReferenceMapAdapter<>(
+                this, this.buildRefSortedMap.subMap(fromKey, toKey)));
     }
 
     @Override
+    @NonNull
     public SortedMap<Integer, R> headMap(Integer toKey) {
         return subMap(Integer.MAX_VALUE, toKey);
     }
 
     @Override
+    @NonNull
     public SortedMap<Integer, R> tailMap(Integer fromKey) {
         return subMap(fromKey, Integer.MIN_VALUE);
     }
 
     @Override
     public Integer firstKey() {
-        R r = newestBuild();
-        if (r == null)    throw new NoSuchElementException();
-        return getNumberOf(r);
+        Integer res = this.buildRefSortedMap.firstKey();
+        if (res == null) {
+            throw new NoSuchElementException();
+        }
+        return res;
     }
 
     @Override
     public Integer lastKey() {
-        R r = oldestBuild();
-        if (r == null)    throw new NoSuchElementException();
-        return getNumberOf(r);
+        Integer res = this.buildRefSortedMap.lastKey();
+        if (res == null) {
+            throw new NoSuchElementException();
+        }
+        return res;
     }
 
     public R newestBuild() {
-        return search(Integer.MAX_VALUE, DESC);
+        Integer n = this.buildRefSortedMap.firstKey();
+        return n == null ? null : getByNumber(n);
     }
 
     public R oldestBuild() {
-        return search(Integer.MIN_VALUE, ASC);
+        Integer n = this.buildRefSortedMap.lastKey();
+        return n == null ? null : getByNumber(n);
     }
 
     @Override
@@ -503,7 +328,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * @since 2.14
      */
     public boolean runExists(int number) {
-        return numberOnDisk.contains(number);
+        return this.buildRefSortedMap.containsKey(number);
     }
 
     /**
@@ -518,37 +343,20 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      *      If DESC, finds the closest #M that satisfies M ≤ N.
      */
     public @CheckForNull R search(final int n, final Direction d) {
+        Integer m;
         switch (d) {
-        case EXACT:
-            return getByNumber(n);
-        case ASC:
-            for (int m : numberOnDisk) {
-                if (m < n) {
-                    // TODO could be made more efficient with numberOnDisk.find
-                    continue;
-                }
-                R r = getByNumber(m);
-                if (r != null) {
-                    return r;
-                }
-            }
-            return null;
-        case DESC:
-            // TODO again could be made more efficient
-            ListIterator<Integer> iterator = numberOnDisk.listIterator(numberOnDisk.size());
-            while (iterator.hasPrevious()) {
-                int m = iterator.previous();
-                if (m > n) {
-                    continue;
-                }
-                R r = getByNumber(m);
-                if (r != null) {
-                    return r;
-                }
-            }
-            return null;
-        default:
-            throw new AssertionError();
+            case EXACT:
+                return getByNumber(n);
+            case ASC:
+                // use descendingMap() to revert default reverse ordering
+                m = this.buildRefSortedMap.descendingMap().ceilingKey(n);
+                return m == null ? null : getByNumber(m);
+            case DESC:
+                // use descendingMap() to revert default reverse ordering
+                m = this.buildRefSortedMap.descendingMap().floorKey(n);
+                return m == null ? null : getByNumber(m);
+            default:
+                throw new AssertionError();
         }
     }
 
@@ -557,37 +365,40 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     }
 
     public R getByNumber(int n) {
-        Index snapshot = index;
-        if (snapshot.byNumber.containsKey(n)) {
-            BuildReference<R> ref = snapshot.byNumber.get(n);
+        if (buildRefSortedMap.containsKey(n)) {
+            BuildReference<R> ref = buildRefSortedMap.get(n);
             if (ref == null) {
                 LOGGER.fine(() -> "known failure of #" + n + " in " + dir);
                 return null;
             }
-            R v = unwrap(ref);
+            R v = ref.get();
             if (v != null) {
                 return v; // already in memory
             }
             // otherwise fall through to load
         }
         synchronized (this) {
-            if (index.byNumber.containsKey(n)) { // JENKINS-22767: recheck inside lock
-                BuildReference<R> ref = index.byNumber.get(n);
+            if (buildRefSortedMap.containsKey(n)) { // JENKINS-22767: recheck inside lock
+                BuildReference<R> ref = buildRefSortedMap.get(n);
                 if (ref == null) {
                     LOGGER.fine(() -> "known failure of #" + n + " in " + dir);
                     return null;
                 }
-                R v = unwrap(ref);
+                R v = ref.get();
                 if (v != null) {
                     return v;
                 }
+
+                if (allowLoad(n)) {
+                    v = load(n);
+                    ref.set(v);
+                    return v;
+                } else {
+                    LOGGER.fine(() -> "declining to load " + n + " in " + dir);
+                    return null;
+                }
             }
-            if (allowLoad(n)) {
-                return load(n, null);
-            } else {
-                LOGGER.fine(() -> "declining to load " + n + " in " + dir);
-                return null;
-            }
+            return null;
         }
     }
 
@@ -595,13 +406,14 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * @return the highest recorded build number, or 0 if there are none
      */
     @Restricted(NoExternalUse.class)
-    public synchronized int maxNumberOnDisk() {
-        return numberOnDisk.max();
+    public int maxNumberOnDisk() {
+        return this.buildRefSortedMap.lastKey();
     }
 
-    protected final synchronized void proposeNewNumber(int number) throws IllegalStateException {
+    protected final void proposeNewNumber(int number) throws IllegalStateException {
         if (number <= maxNumberOnDisk()) {
-            throw new IllegalStateException("JENKINS-27530: cannot create a build with number " + number + " since that (or higher) is already in use among " + numberOnDisk);
+            throw new IllegalStateException("JENKINS-27530: cannot create a build with number " + number +
+                    " since that (or higher) is already in use among " + this.buildRefSortedMap.keySet());
         }
     }
 
@@ -617,68 +429,30 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     public synchronized R put(Integer key, R r) {
         int n = getNumberOf(r);
 
-        Index copy = copy();
+        TreeMap<Integer, BuildReference<R>> copy = copy();
         BuildReference<R> ref = createReference(r);
-        BuildReference<R> old = copy.byNumber.put(n, ref);
-        index = copy;
+        BuildReference<R> old = copy.put(n, ref);
+        this.buildRefSortedMap = copy;
 
-        if (!numberOnDisk.contains(n)) {
-            SortedIntList a = new SortedIntList(numberOnDisk);
-            a.add(n);
-            a.sort();
-            numberOnDisk = a;
-        }
-
-        entrySet.clearCache();
-
-        return unwrap(old);
-    }
-
-    private R unwrap(BuildReference<R> ref) {
-        return ref != null ? ref.get() : null;
+        return old == null ? null : getByNumber(old.number);
     }
 
     @Override
     public synchronized void putAll(Map<? extends Integer, ? extends R> rhs) {
-        Index copy = copy();
+        TreeMap<Integer, BuildReference<R>> copy = copy();
         for (R r : rhs.values()) {
             BuildReference<R> ref = createReference(r);
-            copy.byNumber.put(getNumberOf(r), ref);
+            copy.put(getNumberOf(r), ref);
         }
-        index = copy;
-    }
 
-    /**
-     * Loads all the build records to fully populate the map.
-     * Calling this method results in eager loading everything,
-     * so the whole point of this class is to avoid this call as much as possible
-     * for typical code path.
-     *
-     * @return
-     *      fully populated map.
-     */
-    /*package*/ TreeMap<Integer, BuildReference<R>> all() {
-        if (!fullyLoaded) {
-            synchronized (this) {
-                if (!fullyLoaded) {
-                    Index copy = copy();
-                    for (Integer number : numberOnDisk) {
-                        if (!copy.byNumber.containsKey(number))
-                            load(number, copy);
-                    }
-                    index = copy;
-                    fullyLoaded = true;
-                }
-            }
-        }
-        return index.byNumber;
+        this.buildRefSortedMap = copy;
     }
 
     /**
      * Creates a duplicate for the COW data structure in preparation for mutation.
      */
-    private Index copy() {
-        return new Index(index);
+    private TreeMap<Integer, BuildReference<R>> copy() {
+        return new TreeMap<>(this.buildRefSortedMap);
    }
 
     /**
@@ -686,25 +460,13 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      *
      * @return null if the data failed to load.
      */
-    private R load(int n, Index editInPlace) {
+    private R load(int n) {
         assert Thread.holdsLock(this);
         assert dir != null;
-        R v = load(new File(dir, String.valueOf(n)), editInPlace);
-        if (v == null && editInPlace != null) {
-            // remember the failure.
-            // if editInPlace==null, we can create a new copy for this, but not sure if it's worth doing,
-            // TODO should we also update numberOnDisk?
-            editInPlace.byNumber.put(n, null);
-        }
-        return v;
+        return load(new File(dir, String.valueOf(n)));
     }
 
-    /**
-     * @param editInPlace
-     *      If non-null, update this data structure.
-     *      Otherwise do a copy-on-write of {@link #index}
-     */
-    private R load(File dataDir, Index editInPlace) {
+    private R load(File dataDir) {
         assert Thread.holdsLock(this);
         try {
             R r = retrieve(dataDir);
@@ -712,15 +474,6 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
                 LOGGER.fine(() -> "nothing in " + dataDir);
                 return null;
             }
-
-            Index copy = editInPlace != null ? editInPlace : new Index(index);
-
-            BuildReference<R> ref = createReference(r);
-            BuildReference<R> old = copy.byNumber.put(getNumberOf(r), ref);
-            assert old == null || old.get() == null : "tried to overwrite " + old + " with " + ref;
-
-            if (editInPlace == null)  index = copy;
-
             return r;
         } catch (IOException e) {
             LOGGER.log(Level.WARNING, "Failed to load " + dataDir, e);
@@ -744,7 +497,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * Allow subtype to capture a reference.
      */
     protected BuildReference<R> createReference(R r) {
-        return new BuildReference<>(getIdOf(r), r);
+        return new BuildReference<>(getNumberOf(r), r);
     }
 
 
@@ -760,15 +513,9 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     protected abstract R retrieve(File dir) throws IOException;
 
     public synchronized boolean removeValue(R run) {
-        Index copy = copy();
-        int n = getNumberOf(run);
-        BuildReference<R> old = copy.byNumber.remove(n);
-        SortedIntList a = new SortedIntList(numberOnDisk);
-        a.removeValue(n);
-        numberOnDisk = a;
-        this.index = copy;
-
-        entrySet.clearCache();
+        TreeMap<Integer, BuildReference<R>> copy = copy();
+        BuildReference<R> old = copy.remove(getNumberOf(run));
+        this.buildRefSortedMap = copy;
 
         return old != null;
     }
@@ -776,14 +523,13 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     /**
      * Replaces all the current loaded Rs with the given ones.
      */
-    public synchronized void reset(TreeMap<Integer, R> builds) {
-        Index index = new Index();
+    public synchronized void reset(Map<Integer, R> builds) {
+        TreeMap<Integer, BuildReference<R>> copy = new TreeMap<>(Collections.reverseOrder());
         for (R r : builds.values()) {
-            BuildReference<R> ref = createReference(r);
-            index.byNumber.put(getNumberOf(r), ref);
+            copy.put(getNumberOf(r), createReference(r));
         }
 
-        this.index = index;
+        this.buildRefSortedMap = copy;
     }
 
     @Override
@@ -800,7 +546,6 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
         ASC, DESC, EXACT
     }
 
-    private static final SortedMap EMPTY_SORTED_MAP = Collections.unmodifiableSortedMap(new TreeMap());
 
     static final Logger LOGGER = Logger.getLogger(AbstractLazyLoadRunMap.class.getName());
 }

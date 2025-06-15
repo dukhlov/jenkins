@@ -78,7 +78,7 @@ class AbstractLazyLoadRunMapTest {
             return new FakeMap(getDir()) {
                 @Override
                 protected BuildReference<Build> createReference(Build r) {
-                    return new BuildReference<>(Integer.toString(r.n), /* pretend referent expired */ null);
+                    return new BuildReference<>(r.n, /* pretend referent expired */ null);
                 }
             };
         }
