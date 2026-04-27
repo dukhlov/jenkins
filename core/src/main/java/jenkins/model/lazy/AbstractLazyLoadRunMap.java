@@ -36,6 +36,8 @@ import java.util.AbstractMap;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -102,6 +104,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
             return AbstractLazyLoadRunMap.this.removeValue(value);
         }
     };
+    private final Set<Map<Integer, R>> reloadBuffers = Collections.newSetFromMap(new IdentityHashMap<>());
 
     @Override
     public Set<Integer> keySet() {
@@ -125,7 +128,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * because the compatibility requires that we make it settable
      * in the first call after the constructor.
      */
-    protected File dir;
+    protected volatile File dir;
 
     @Restricted(NoExternalUse.class) // subclassing other than by RunMap does not guarantee compatibility
     protected AbstractLazyLoadRunMap() {
@@ -135,8 +138,9 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     protected void initBaseDir(File dir) {
         assert this.dir == null;
         this.dir = dir;
-        if (dir != null)
-            loadNumberOnDisk();
+        if (dir != null) {
+            reloadBuildRefsFromDisk(Collections.emptyList());
+        }
     }
 
     /**
@@ -165,13 +169,13 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * Primarily for debugging and testing lazy loading behaviour.
      * @since 1.507
      */
-    public synchronized void purgeCache() {
-        loadNumberOnDisk();
+    public void purgeCache() {
+        reloadBuildRefsFromDisk(Collections.emptyList());
     }
 
     private static final Pattern BUILD_NUMBER = Pattern.compile("[0-9]+");
 
-    private void loadNumberOnDisk() {
+    private TreeMap<Integer, BuildReference<R>> loadBuildRefsFromDisk() {
         String[] kids = dir.list();
         if (kids == null) {
             // the job may have just been created
@@ -195,7 +199,37 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
                 // matched BUILD_NUMBER but not an int?
             }
         }
-        core.replaceBy(newBuildRefsMap);
+        return newBuildRefsMap;
+    }
+
+    /**
+     * Reloads build references from disk, rebuilding the internal map and
+     * discarding previously loaded (cached) data. Preserves the given
+     * {@code buildsToPreserve} (e.g., running builds).
+     */
+    @Restricted(NoExternalUse.class)
+    protected void reloadBuildRefsFromDisk(Iterable<R> buildsToPreserve) {
+        Map<Integer, R> buffer = new HashMap<>();
+        synchronized (this) {
+            this.reloadBuffers.add(buffer);
+        }
+        try {
+            TreeMap<Integer, BuildReference<R>> newBuildRefsMap = loadBuildRefsFromDisk();
+            // block the core map from updates, process reload buffer and buildsToPreserve
+            synchronized (this) {
+                for (R r : buffer.values()) {
+                    newBuildRefsMap.putIfAbsent(getNumberOf(r), createReference(r));
+                }
+                for (R r : buildsToPreserve) {
+                    newBuildRefsMap.put(getNumberOf(r), createReference(r));
+                }
+                core.replaceBy(newBuildRefsMap);
+            }
+        } finally {
+            synchronized (this) {
+                this.reloadBuffers.remove(buffer);
+            }
+        }
     }
 
     @Restricted(NoExternalUse.class)
@@ -371,7 +405,7 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
             return v; // already in memory
         }
         // otherwise fall through to load
-        synchronized (this) {
+        synchronized (ref) {
             if ((v = ref.get()) != null) {
                 return v; // already in memory
             }
@@ -426,6 +460,9 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     public synchronized R put(Integer key, R r) {
         int n = getNumberOf(r);
         BuildReference<R> old = core.put(n, createReference(r));
+        for (Map<Integer, R>  buffer : reloadBuffers) {
+            buffer.put(n, r);
+        }
         return resolveBuildRef(old);
     }
 
@@ -436,6 +473,9 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
             newWrapperData.put(entry.getKey(), createReference(entry.getValue()));
         }
         core.putAll(newWrapperData);
+        for (Map<Integer, R> buffer : reloadBuffers) {
+            buffer.putAll(newData);
+        }
     }
 
     @Override
@@ -449,13 +489,11 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
      * @return null if the data failed to load.
      */
     private R load(int n) {
-        assert Thread.holdsLock(this);
         assert dir != null;
         return load(new File(dir, String.valueOf(n)));
     }
 
     private R load(File dataDir) {
-        assert Thread.holdsLock(this);
         try {
             R r = retrieve(dataDir);
             if (r == null) {
@@ -502,7 +540,12 @@ public abstract class AbstractLazyLoadRunMap<R> extends AbstractMap<Integer, R> 
     protected abstract Class<R> getBuildClass();
 
     public synchronized boolean removeValue(R run) {
-        return core.remove(getNumberOf(run)) != null;
+        Integer n = getNumberOf(run);
+        boolean res = core.remove(n) != null;
+        for (Map<Integer, R> buffer : reloadBuffers) {
+            buffer.remove(n);
+        }
+        return res;
     }
 
     /**

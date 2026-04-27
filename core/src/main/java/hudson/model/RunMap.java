@@ -83,8 +83,12 @@ public final class RunMap<R extends Run<?, R>> extends AbstractLazyLoadRunMap<R>
     }
 
     @Restricted(NoExternalUse.class)
-    public RunMap(@NonNull Job<?, ?> job) {
+    public RunMap(@NonNull Job<?, ?> job, Constructor<R> cons, boolean skipInitBaseDir) {
         this.job = Objects.requireNonNull(job);
+        this.cons = cons;
+        if (!skipInitBaseDir) {
+            initBaseDir(job.getBuildDir());
+        }
     }
 
     /**
@@ -294,6 +298,12 @@ public final class RunMap<R extends Run<?, R>> extends AbstractLazyLoadRunMap<R>
     public void load(Job job, Constructor<R> cons) {
         this.cons = cons;
         initBaseDir(job.getBuildDir());
+    }
+
+    @Restricted(NoExternalUse.class)
+    public void reload(Iterable<R> buildsToPreserve) {
+        updateBaseDir(Objects.requireNonNull(job).getBuildDir());
+        reloadBuildRefsFromDisk(buildsToPreserve);
     }
 
     private static final Logger LOGGER = Logger.getLogger(RunMap.class.getName());
